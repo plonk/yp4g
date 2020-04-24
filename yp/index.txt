@@ -1,0 +1,76 @@
+<?php
+	require_once 'yp4g.cfg.php';
+	require_once 'util.php';
+	
+	header('Content-Type: text/plain; charset=UTF-8');
+	
+	require 'index_qs.inc';
+	
+	$Remote = $_SERVER["REMOTE_ADDR"];
+	$Host = @$_GET['host'];
+	
+	require 'index_init.inc';
+	
+	$db = sqlite_popen($ChannelDB);
+	
+	$sql = "SELECT * FROM allow $SearchSQL ORDER BY age, listeners DESC;";
+	$result = sqlite_unbuffered_query($db, $sql, SQLITE_ASSOC);
+	
+	$count = 0;
+	while($data = sqlite_fetch_array($result, SQLITE_ASSOC))
+	{
+		require 'index_speed.inc';
+		
+		if(!$PortCheckPass)
+			continue;
+		
+		$Name = $data['name'];
+		if(!empty($data['ns']))
+			$Name .= ' &lt;'.$data['ns'].'&gt;';
+		
+		if($SpeedCheckPass){
+			print $Name.'<>';
+			print $data['id'].'<>';
+			print $data['ip'].'<>';
+		}else{
+			if($Speed > 0){
+				print $Name.' (再生不可)<>';
+			}else{
+				print $Name.' (要帯域チェック)<>';
+				$count++;
+			}
+			
+			print '00000000000000000000000000000000<><>';
+		}
+		
+		print $data['url'].'<>';
+		print $data['genre'].'<>';
+		
+		if(empty($data['description']))
+			print '&lt;'.$LimitMode.'&gt;<>';
+		else
+			print $data['description'].' - &lt;'.$LimitMode.'&gt;<>';
+		
+		print $data['listeners'].'<>';
+		print $data['relays'].'<>';
+		print $data['bitrate'].'<>';
+		print $data['type'].'<>';
+		print $data['track_artist'].'<>';
+		print $data['track_album'].'<>';
+		print $data['track_title'].'<>';
+		print $data['track_contact'].'<>';
+		print $data['name_url'].'<>';
+		print print_time($data['age']).'<>';
+		print $data['status'].'<>';
+		print $data['comment'].'<>';
+		print $data['direct']."\n";
+	}
+	
+	if($PortCheckPassOrg)
+	{
+		if($Speed <= 0)
+			print htmlencode($YPName)."◆アップロード帯域<>00000000000000000000000000000000<><>".$SpeedChecker."<><>No data<>-9<>-9<>0<>WMV<><><>測定はコンタクトURLから<><><>00:00<>click<><>0\n";
+		else if($Speed > 0 && $Speed < $MossoLine)
+			print htmlencode($YPName)."◆アップロード帯域<>00000000000000000000000000000000<><>".$SpeedChecker."<><>".$Speed." kbps<>-9<>-9<>0<>WMV<><><>再測定はコンタクトURLから<><><>00:00<>click<><>0\n";
+	}
+?>

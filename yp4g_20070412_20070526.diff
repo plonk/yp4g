@@ -1,0 +1,132 @@
+Index: _src/uptest_srv/socket.h
+===================================================================
+--- _src/uptest_srv/socket.h	(revision 29)
++++ _src/uptest_srv/socket.h	(working copy)
+@@ -214,9 +214,8 @@
+ #else
+ 	int ret;
+     do{
+-		errno = 0;
+     	ret = ::connect(sock_, (const sockaddr*)&addr, sizeof(sockaddr_in));
+-    }while(errno == EINTR || errno == EAGAIN);
++    }while(ret == -1 && errno == EINTR);
+     if(ret == -1)
+       close();
+ #endif
+@@ -254,18 +253,16 @@
+   int send(const void* buffer, int size){
+ 	int len;
+ 	do{
+-		errno = 0;
+ 		len = ::send(sock_, (const char*)buffer, size, 0);
+-	}while(errno == EINTR || errno == EAGAIN);
++	}while(len == -1 && errno == EINTR);
+     return len;
+   }
+   //��M
+   int recv(void* buffer, int size){
+ 	int len;
+ 	do{
+-		errno = 0;
+ 		len = ::recv(sock_, (char*)buffer, size, 0);
+-	}while(errno == EINTR || errno == EAGAIN);
++	}while(len == -1 && errno == EINTR);
+     return len;
+   }
+ #endif
+@@ -485,9 +482,8 @@
+     ret = ::accept(socket(), (struct sockaddr *)&sa, &salen);
+ #else
+ 	do{
+-		errno = 0;
+     	ret = ::accept(socket(), (struct sockaddr *)&sa, &salen);
+-    }while(errno == EINTR || errno == EAGAIN);
++    }while(ret == -1 && errno == EINTR);
+ #endif
+ 
+ #ifdef GIMITE_WIN32
+Index: _src/uptest_srv/str.cpp
+===================================================================
+--- _src/uptest_srv/str.cpp	(revision 29)
++++ _src/uptest_srv/str.cpp	(working copy)
+@@ -63,12 +63,15 @@
+ 	
+ 	for(i=0; i<maxlen; i++)
+ 	{
++		c = 0;
+ 		s.read(&c, 1);
+ 		
+ 		if(c == '\r')
+ 			continue;
+ 		else if(c == '\n')
+ 			break;
++		else if(c == 0)
++			break;
+ 		
+ 		str.append(1, c);
+ 	}
+Index: reload/reload.php
+===================================================================
+--- reload/reload.php	(revision 29)
++++ reload/reload.php	(working copy)
+@@ -270,7 +270,7 @@
+ 				sqlite_query($db, "CREATE TABLE log (date_id INTEGER NOT NULL, time INTEGER NOT NULL, listeners INTEGER, relays INTEGER, age INTEGER, same INTEGER, id TEXT, ip TEXT, bitrate INTEGER, type TEXT, genre_org TEXT, genre TEXT, ns TEXT, description TEXT, url TEXT, comment TEXT, track_artist TEXT, track_title TEXT, track_album TEXT, track_genre TEXT, track_contact TEXT);");
+ 				sqlite_query($db, "CREATE INDEX log_idx ON log (date_id, time, same, id, ip);");
+ 				
+-				sqlite_set_var($db, 'name', $info['NAME']);
++				sqlite_set_var($db, 'name', $info['name']);
+ 				sqlite_set_var($db, 'name_id', $name_md5);
+ 			}
+ 			
+Index: yp/index.php
+===================================================================
+--- yp/index.php	(revision 29)
++++ yp/index.php	(working copy)
+@@ -82,7 +82,7 @@
+ 		// -----------------------------------------------------------------------------
+ 		// チャンネル情報取得
+ 		
+-		$db = sqlite_open($ChannelDB);
++		$db = sqlite_popen($ChannelDB);
+ 		
+ 		if(!$PortCheckPassOrg && !empty($SearchSQL))
+ 			$SearchSQL .= " AND (limit_type='')";
+Index: yp/index.txt
+===================================================================
+--- yp/index.txt	(revision 29)
++++ yp/index.txt	(working copy)
+@@ -11,7 +11,7 @@
+ 	
+ 	require 'index_init.inc';
+ 	
+-	$db = sqlite_open($ChannelDB);
++	$db = sqlite_popen($ChannelDB);
+ 	
+ 	$sql = "SELECT * FROM allow $SearchSQL ORDER BY age, listeners DESC;";
+ 	$result = sqlite_unbuffered_query($db, $sql, SQLITE_ASSOC);
+Index: yp/index_init.inc
+===================================================================
+--- yp/index_init.inc	(revision 29)
++++ yp/index_init.inc	(working copy)
+@@ -5,7 +5,7 @@
+ 	
+ 	$DefaultPort = 7144;
+ 	
+-	$hostdb = sqlite_open($HostDB);
++	$hostdb = sqlite_popen($HostDB);
+ 	
+ 	$sql = "SELECT * FROM host WHERE ip='$Remote';";
+ 	$data = sqlite_array_query($hostdb, $sql, SQLITE_ASSOC);
+Index: yp/index_qs.inc
+===================================================================
+--- yp/index_qs.inc	(revision 29)
++++ yp/index_qs.inc	(working copy)
+@@ -12,7 +12,7 @@
+ 	
+ 	if(!empty($_GET['find']))
+ 	{
+-		$target = "name_raw||' '||genre||' '||description||' '||comment||' '||track_artist||' '||track_title";
++		$target = "name||' '||genre||' '||description||' '||comment||' '||track_artist||' '||track_title";
+ 		
+ 		$words = str_replace('　', ' ', @$_GET['find']);
+ 		$words = explode(' ', $words);

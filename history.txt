@@ -1,0 +1,51 @@
+◆2007/05/26
+・uptest_srv 受信スレッドが固まって最大接続数に達してしまうことがあるのを修正
+・その他細かい修正
+
+◆2007/04/12
+・uptest_srv
+  ・Daemonモードを追加した (Linux)
+  ・割り込み関係の修正 (Linux)
+  ・その他細かい修正
+・index.*
+  ・処理の軽量化 (30%ほど)
+  ・ポート未開放時にページセレクタが変になるのを修正
+  ・index.txtのソート順を修正
+・index.txtとyp4g.xmlのKeepAliveを無効化
+
+◆2007/02/12
+・uptest_srv HTTPレスポンスヘッダの修正
+
+◆2006/11/03
+・reload.php 名前空間機能を復活させた
+・index.* 名前空間関係の修正
+・yp4g.xml 帯域測定用ツールのインターフェース追加
+・その他細かい修正
+
+◆2006/10/29
+・データベースをMySQLからSQLiteに変更
+・uptest_srv プログラムを書き直した
+・uptest_srv linux環境で全く使い物にならなかったのを修正したつもり
+・reload.php 古いホスト情報を定期的に削除するようにした
+・reload.php 統計ログに書き出すデータの軽量化
+・reload.php UTF-8外の文字の除去を強化
+・chat.php 初期のバージョンのものを復活
+・chat.php BBQ機能をつけた
+・getgmt.php 前よりちゃんと作った
+・index.php 検索フォームをつけた
+・index.php チャンネルが多い場合にページを分けられるようにした
+・index.txt 帯域チェック用のチャンネル情報を変更
+・result.php 作った
+・その他細かい改良
+
+
+◆2006/06/09
+・index.* 名前空間みたいなものをつけた
+・index.txt 帯域チェック用のチャンネル情報をちょっと変更
+
+◆2006/05/06
+・uptest_srv Linux等でコンパイル可能にした
+・uptest_srv 接続ログを出力するようにした
+・denied.php htmlencodeの付け忘れを修正
+・getgmt.php 〃
+・getgmt_list.php 〃

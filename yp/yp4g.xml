@@ -1,0 +1,61 @@
+<?php
+	require_once './yp4g.cfg.php';
+	require_once './util.php';
+	
+	header('Content-Type: text/xml; charset=UTF-8');
+	
+	$hostdb = sqlite_open($HostDB);
+	
+	$sql = "SELECT * FROM host WHERE ip='{$_SERVER['REMOTE_ADDR']}';";
+	$data = sqlite_array_query($hostdb, $sql, SQLITE_ASSOC);
+	$data = array_shift($data);
+	
+	$name = htmlencode($YPName);
+	
+	if(is_numeric($data['speed']))
+		$speed = $data['speed'];
+	else
+		$speed = 0;
+	
+	if($speed >= $MossoLine)
+	{
+		$speed = $MossoLine;
+		$over = 1;
+	}
+	else
+	{
+		$over = 0;
+	}
+	if(is_numeric($data['speed_date']))
+		$remain = $data['speed_date'] + $UptestInterval - time();
+	else
+		$remain = 0;
+	
+	
+	if($SpeedCheck && is_numeric($data['port_open']) && $over == 0)
+		$checkable = $data['port_open'];
+	else
+		$checkable = 0;
+	
+	if($remain < 0)
+		$remain = 0;
+	
+	$enabled = $SpeedCheck ? 1 : 0;
+	
+	if(is_numeric($data['port_open']))
+		$port_open = $data['port_open'];
+	else
+		$port_open = 0;
+	
+	$post_size = $PostSize;
+	
+	print <<<EOM
+<?xml version="1.0" encoding="utf-8" ?>
+<yp4g>
+	<yp name="$name" />
+	<host ip="{$_SERVER['REMOTE_ADDR']}" port_open="$port_open" speed="$speed" over="$over" />
+	<uptest checkable="$checkable" remain="$remain" />
+	<uptest_srv addr="$MyDomain" port="$UptestPort" object="$UptestObject" post_size="$post_size" limit="$UptestLimit" interval="$UptestInterval" enabled="$enabled" />
+</yp4g>
+EOM;
+?>

@@ -1,0 +1,928 @@
+Index: _src/uptest_srv/main.cpp
+===================================================================
+--- _src/uptest_srv/main.cpp	(revision 17)
++++ _src/uptest_srv/main.cpp	(working copy)
+@@ -18,8 +18,6 @@
+ #ifdef WIN32
+  #include <windows.h>
+  #include <process.h>
+-
+- #include "sqlite.h"
+ #else
+  #include <signal.h>
+  #include <unistd.h>
+@@ -27,8 +25,7 @@
+  #include <errno.h>
+  #include <sys/types.h>
+  #include <netinet/tcp.h>
+-
+- #include <sqlite.h>
++ #include <fcntl.h>
+ #endif
+ 
+ #include <stdio.h>
+@@ -37,6 +34,8 @@
+ #include <iostream>
+ #include <string>
+ 
++#include <sqlite.h>
++
+ #include "str.h"
+ #include "exception.h"
+ #include "mutex.h"
+@@ -44,7 +43,7 @@
+ #include "sqlite_tools.h"
+ #include "tools.h"
+ 
+-#define BUFLEN 256
++#define BUFLEN 512
+ #define MAX_HEADER_SIZE (2*1024)
+ #define MAX_GETLINE_SIZE 1024
+ 
+@@ -139,7 +138,7 @@
+ 	start = get_milli_time();
+ 
+ 	addr = info->dest_addr.ip.as_int();
+-	sprintf(sztemp, "%d.%d.%d.%d", addr&0xff, (addr>>8)&0xff, (addr>>16)&0xff, (addr>>24)&0xff);
++	sprintf(sztemp, "%d.%d.%d.%d", ((unsigned char*)&addr)[0], ((unsigned char*)&addr)[1], ((unsigned char*)&addr)[2], ((unsigned char*)&addr)[3]);
+ 	remote = sztemp;
+ 
+ 	try{
+@@ -149,7 +148,7 @@
+ 		{
+ 			std::string::size_type pos1, pos2;
+ 
+-			std::getline2(s, str, MAX_GETLINE_SIZE);
++			getline2(s, str, MAX_GETLINE_SIZE);
+ 			total += (int)str.length();
+ 
+ 			pos1 = str.find(" ");
+@@ -170,7 +169,7 @@
+ 		do{
+ 			std::string::size_type pos;
+ 
+-			std::getline2(s, str, MAX_GETLINE_SIZE);
++			getline2(s, str, MAX_GETLINE_SIZE);
+ 			total += (int)str.length();
+ 
+ 			if(total > MAX_HEADER_SIZE)
+@@ -198,7 +197,7 @@
+ 		}while(str.length() > 0);
+ 
+ 		if(http_method != "POST" || http_object != settings.strUptestObject)
+-			throw StreamException(0, "HTTP request error.");
++			throw StreamException(0, "HTTP request error. [%s] %s", http_method.c_str(), http_object.c_str());
+ 
+ 		if(http_contentlen < settings.iMinPostSize || http_contentlen > settings.iMaxPostSize)
+ 			throw StreamException(0, "HTTP Content-Length error. (len=%d)", http_contentlen);
+@@ -237,16 +236,17 @@
+ 				int bitrate = atoi(p);
+ 				if(bitrate >= settings.iMossoLine)
+ 				{
+-					throw StreamException(0, "It's not necessary to test.");
++					throw StreamException(0, "It's not necessary to test. %dkbps", bitrate);
+ 				}
+ 			}
+ 
+ 			p = sqlite_get_item(result, col, 0, "speed_date");
+ 			if(p)
+ 			{
+-				if((time(NULL)-atoi(p)) < settings.iUptestInterval)
++				int interval = time(NULL) - atoi(p);
++				if(interval < settings.iUptestInterval)
+ 				{
+-					throw StreamException(0, "Test interval is too short.");
++					throw StreamException(0, "Test interval is too short. %ds", interval);
+ 				}
+ 			}
+ 		}
+@@ -556,25 +556,71 @@
+ 	}
+ }
+ 
++void print_usage()
++{
++	printf(
++		"Usage: uptest_srv [Options] config-file\n"
++		"Options:\n"
++		"  -d              Daemon mode\n"
++		"  -p <pidfile>    Write PID file\n"
++		"SQLite version: %s\n",
++		sqlite_libversion());
++	
++	exit(0);
++}
++
+ int main(int argc, char **argv)
+ {
++	int i;
++	bool daemon_mode = false;
++	std::string pidfile;
++	
+ 	signal(SIGINT, signal_handler);
+ 	signal(SIGTERM, signal_handler);
+ 	signal(SIGPIPE, SIG_IGN);
+-	signal(SIGABRT, SIG_IGN);
+ 	signal(SIGHUP , SIG_IGN);
+-	signal(SIGALRM, SIG_IGN);
+-	signal(SIGUSR1, SIG_IGN);
+-	signal(SIGUSR2, SIG_IGN);
+-
+-	if(argc != 2)
++	
++	for(i=1; i<argc; i++)
+ 	{
+-		printf("Usage: uptest_srv config-file\nSQLite version: %s\n", sqlite_libversion());
+-		return 0;
++		if(!strcmp("-d", argv[i]))
++		{
++			daemon_mode = true;
++		}
++		else if(!strcmp("-p", argv[i]))
++		{
++			if(argc <= i+1)
++				print_usage();
++			
++			pidfile = argv[i+1];
++			
++			i++;
++		}
++		else
++		{
++			settings.strConf = argv[i];
++		}
+ 	}
+ 	
+-	settings.strConf = argv[1];
+-
++	if(settings.strConf == "")
++		print_usage();
++	
++	if(daemon_mode)
++	{
++		daemon(1, 0);
++	}
++	
++	umask(0);
++	
++	if(pidfile != "")
++	{
++		char sztemp[BUFLEN];
++		sprintf(sztemp, "%d\n", (int)getpid());
++		
++		CFile fpid;
++		fpid.reopen(pidfile);
++		fpid.write(sztemp, strlen(sztemp));
++	}
++	
+ 	_main();
+ 
+ 	return 0;
+Index: _src/uptest_srv/makefile
+===================================================================
+--- _src/uptest_srv/makefile	(revision 17)
++++ _src/uptest_srv/makefile	(working copy)
+@@ -1,13 +1,16 @@
++SRC = file.cpp main.cpp sqlite_tools.cpp str.cpp tools.cpp
++LIB = -lpthread -lsqlite
++OBJ = $(SRC:.cpp=.o)
++
+ CC = g++
+-LIBPATH = -L/usr/lib
+-LIBS = -lpthread -lz -lsqlite
+-OBJS = file.cpp main.cpp sqlite_tools.cpp str.cpp tools.cpp
+ 
+-uptest_srv: $(OBJS)
+-	$(CC) -o $@ $(OBJS) $(LIBPATH) $(LIBS)
++all: uptest_srv
+ 
+-.c.o:
+-	$(CC) -c $<
++uptest_srv: $(OBJ)
++	$(CC) -o $@ $(LIB) $(OBJ)
+ 
++%.o:%.cpp
++	$(CC) -c $< -o $@
++
+ clean:
+-	rm -f *.o
++	rm -f $(OBJ)
+Index: _src/uptest_srv/socket.h
+===================================================================
+--- _src/uptest_srv/socket.h	(revision 17)
++++ _src/uptest_srv/socket.h	(working copy)
+@@ -30,6 +30,7 @@
+ #  include <arpa/inet.h>
+ #  include <netdb.h>
+ #  include <unistd.h>
++#  include <errno.h>
+ #endif
+ //---------------------------------------------------------------------------
+ namespace gimite{
+@@ -206,8 +207,19 @@
+     addr.sin_family= AF_INET;
+     addr.sin_port= htons((unsigned short)port);
+     addr.sin_addr= host.addr();
++
++#ifdef GIMITE_WIN32
+     if (::connect(sock_, (const sockaddr*)&addr, sizeof(sockaddr_in))==-1)
+       close();
++#else
++	int ret;
++    do{
++		errno = 0;
++    	ret = ::connect(sock_, (const sockaddr*)&addr, sizeof(sockaddr_in));
++    }while(errno == EINTR || errno == EAGAIN);
++    if(ret == -1)
++      close();
++#endif
+     return is_open();
+   }
+   //ؒf
+@@ -228,6 +240,7 @@
+     sock_= -1;
+     return sock;
+   }
++#ifdef GIMITE_WIN32
+   //M
+   int send(const void* buffer, int size){
+     return ::send(sock_, (const char*)buffer, size, 0);
+@@ -236,6 +249,26 @@
+   int recv(void* buffer, int size){
+     return ::recv(sock_, (char*)buffer, size, 0);
+   }
++#else
++  //M
++  int send(const void* buffer, int size){
++	int len;
++	do{
++		errno = 0;
++		len = ::send(sock_, (const char*)buffer, size, 0);
++	}while(errno == EINTR || errno == EAGAIN);
++    return len;
++  }
++  //M
++  int recv(void* buffer, int size){
++	int len;
++	do{
++		errno = 0;
++		len = ::recv(sock_, (char*)buffer, size, 0);
++	}while(errno == EINTR || errno == EAGAIN);
++    return len;
++  }
++#endif
+   //墲ﾉڑ黷ﾄ邩
+   bool is_open()const{ return sock_!=-1; }
+   //\Pbgnh
+@@ -254,7 +287,7 @@
+   //nM
+   virtual std::streamsize xsputn(const char_type* s, std::streamsize n){
+     if (!is_open()) return 0;
+-    sock_result_t res= ::send(sock_, s, int(n), 0);
++    sock_result_t res= send(s, int(n));
+     return res==-1? 0 : res;
+   }
+   //Mobt@ﾉȂB
+@@ -265,7 +298,7 @@
+         buffer_[0]= *(gptr()-1);
+       else
+         buffer_[0]= '\0';
+-      sock_result_t size= ::recv(sock_, &buffer_[1], int(buffer_.size()-1), 0);
++      sock_result_t size= recv(&buffer_[1], int(buffer_.size()-1));
+       if (size<=0)
+         return traits_type::eof();
+       else
+@@ -447,7 +480,15 @@
+ #endif
+ 
+ 	salen = sizeof(sa);
++	
++#ifdef GIMITE_WIN32
+     ret = ::accept(socket(), (struct sockaddr *)&sa, &salen);
++#else
++	do{
++		errno = 0;
++    	ret = ::accept(socket(), (struct sockaddr *)&sa, &salen);
++    }while(errno == EINTR || errno == EAGAIN);
++#endif
+ 
+ #ifdef GIMITE_WIN32
+ 	last_addr.ip = ip_address(sa.sin_addr.S_un.S_addr);
+Index: _src/uptest_srv/sqlite_tools.h
+===================================================================
+--- _src/uptest_srv/sqlite_tools.h	(revision 17)
++++ _src/uptest_srv/sqlite_tools.h	(working copy)
+@@ -16,11 +16,7 @@
+ #ifndef SQLITE_TOOLSH
+ #define SQLITE_TOOLSH
+ 
+-#ifdef WIN32
+- #include "sqlite.h"
+-#else
+- #include <sqlite.h>
+-#endif
++#include <sqlite.h>
+ 
+ bool sqlite_table_exists(sqlite *db, const char *name);
+ int sqlite_get_col_index(char **result, int ncol, const char *name);
+Index: _src/uptest_srv/str.cpp
+===================================================================
+--- _src/uptest_srv/str.cpp	(revision 17)
++++ _src/uptest_srv/str.cpp	(working copy)
+@@ -1,3 +1,18 @@
++// --------------------------------------------------------------------
++// YP4G Uptest Server
++// Author : e5bW6vDOJ.
++// --------------------------------------------------------------------
++// This program is free software; you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation; either version 2 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++// --------------------------------------------------------------------
++
+ #include <algorithm>
+ 
+ #include "str.h"
+@@ -2,3 +17,3 @@
+ 
+-void trim_left(std::string& str, const char* chars2remove)
++void trim_left(std::string &str, const char *chars2remove)
+ {
+@@ -9,26 +24,26 @@
+ 		std::string::size_type pos = str.find_first_not_of(chars2remove);
+ 
+ 		if (pos != std::string::npos)
+-			str.erase(0,pos);
++			str.erase(str.begin(), str.begin()+pos);
+ 		else
+ 			str.erase(str.begin() , str.end());
+ 	}
+ }
+ 
+-void trim_right(std::string& str, const char* chars2remove)
++void trim_right(std::string &str, const char *chars2remove)
+ {
+ 	if (!str.empty())
+ 	{
+ 		std::string::size_type pos = str.find_last_not_of(chars2remove);
+ 
+ 		if (pos != std::string::npos)
+-			str.erase(pos+1);
++			str.erase(str.begin()+pos+1, str.end());
+ 		else
+-			str.erase( str.begin() , str.end() );
++			str.erase(str.begin() , str.end());
+ 	}
+ }
+ 
+-void trim(std::string& str, const char* chars2remove)
++void trim(std::string &str, const char *chars2remove)
+ {
+ 	trim_left(str, chars2remove);
+ 	trim_right(str, chars2remove);
+@@ -38,3 +53,25 @@
+ {
+ 	std::transform(str.begin(), str.end(), str.begin(), tolower);
+ }
++
++int getline2(std::istream &s, std::string &str, int maxlen)
++{
++	int i;
++	char c;
++	
++	str.erase(str.begin() , str.end());
++	
++	for(i=0; i<maxlen; i++)
++	{
++		s.read(&c, 1);
++		
++		if(c == '\r')
++			continue;
++		else if(c == '\n')
++			break;
++		
++		str.append(1, c);
++	}
++	
++	return str.length();
++}
+Index: _src/uptest_srv/str.h
+===================================================================
+--- _src/uptest_srv/str.h	(revision 17)
++++ _src/uptest_srv/str.h	(working copy)
+@@ -1,3 +1,18 @@
++// --------------------------------------------------------------------
++// YP4G Uptest Server
++// Author : e5bW6vDOJ.
++// --------------------------------------------------------------------
++// This program is free software; you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation; either version 2 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++// --------------------------------------------------------------------
++
+ #ifndef STRH
+ #define STRH
+ 
+@@ -4,150 +19,10 @@
+ #include <istream>
+ #include <string>
+ 
+-void trim_left(std::string& str, const char* chars2remove = " \t\r\n");
+-void trim_right(std::string& str, const char* chars2remove = " \t\r\n");
+-void trim(std::string& str, const char* chars2remove = " \t\r\n");
++void trim_left(std::string &str, const char *chars2remove = " \t\r\n");
++void trim_right(std::string &str, const char *chars2remove = " \t\r\n");
++void trim(std::string &str, const char *chars2remove = " \t\r\n");
+ void strtolower(std::string &str);
++int getline2(std::istream &s, std::string &str, int maxlen);
+ 
+ #endif
+Index: reload/reload.php
+===================================================================
+--- reload/reload.php	(revision 17)
++++ reload/reload.php	(working copy)
+@@ -38,7 +38,7 @@
+ 				$attr['hide_status'] = $temp[4]=='?' ? 0 : 1;
+ 				
+ 				if(!empty($temp[2]))
+-					$nslist[$temp[2]] = $temp[2];
++					@$nslist[$temp[2]]++;
+ 			}
+ 			else
+ 			{	// 他YPからの流出か、ジャンルの書式が間違っている
+@@ -53,6 +53,9 @@
+ 		}
+ 		else if($path == '/peercast/channels_found/channel/hits')
+ 		{
++			$attr['listeners_org'] = $attr['listeners'];
++			$attr['relays_org'] = $attr['relays'];
++			
+ 			if($chlist[$crr_nameid]['hide_status'])
+ 			{
+ 				$attr['listeners'] = -1;
+@@ -133,15 +136,19 @@
+ 	{
+ 		if($info['newest'] > $DeadLine)		// 更新の無いチャンネルを飛ばす
+ 		{
++			if(isset($nslist[$info['ns']]))
++				$nslist[$info['ns']]--;
++			
+ 			$chlist[$info['id']]['allow'] = 0;
+-			unset($nslist[$info['ns']]);
+ 			continue;
+ 		}
+ 		
+-		if(!isset($info['host_ip']) || preg_match('/^[^:]+:0$/', $info['host_ip']))
++		if(!isset($info['host_ip']) || preg_match('/:0$/', $info['host_ip']))
+ 		{
++			if(isset($nslist[$info['ns']]))
++				$nslist[$info['ns']]--;
++			
+ 			$chlist[$info['id']]['allow'] = 0;
+-			unset($nslist[$info['ns']]);
+ 			$info['allow'] = 0;				// ポート0は載せない
+ 		}
+ 		
+@@ -156,12 +163,29 @@
+ 			$deny_cnt++;
+ 		}
+ 		
++		
++		$info['name_raw'] = $info['name'];
++		$info['name_url'] = urlencode($info['name_raw']);
++		$info['name'] = htmlspecialchars($info['name_raw'], ENT_QUOTES, 'UTF-8');
++		$info['genre'] = htmlspecialchars($info['genre'], ENT_QUOTES, 'UTF-8');
++		$info['desc'] = htmlspecialchars($info['desc'], ENT_QUOTES, 'UTF-8');
++		$info['url'] = htmlspecialchars($info['url'], ENT_QUOTES, 'UTF-8');
++		$info['comment'] = htmlspecialchars($info['comment'], ENT_QUOTES, 'UTF-8');
++		$info['track_artist'] = htmlspecialchars($info['track_artist'], ENT_QUOTES, 'UTF-8');
++		$info['track_title'] = htmlspecialchars($info['track_title'], ENT_QUOTES, 'UTF-8');
++		$info['track_album'] = htmlspecialchars($info['track_album'], ENT_QUOTES, 'UTF-8');
++		$info['track_genre'] = htmlspecialchars($info['track_genre'], ENT_QUOTES, 'UTF-8');
++		$info['track_contact'] = htmlspecialchars($info['track_contact'], ENT_QUOTES, 'UTF-8');
++		$info['status'] = htmlspecialchars($info['status'], ENT_QUOTES, 'UTF-8');
++		
+ 		array_walk($info, 'sqlite_escape_string_walk');
+ 		
+-		$sql .= sprintf("'%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s'",
++		$sql .= sprintf("'%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s'",
+ 			$info['id'],
+ 			$info['host_ip'],
+ 			$info['name'],
++			$info['name_raw'],
++			$info['name_url'],
+ 			$info['bitrate'],
+ 			$info['type'],
+ 			$info['listeners'],
+@@ -190,8 +214,11 @@
+ 	sqlite_set_var($db, 'deny_count', $deny_cnt);
+ 	
+ 	$temp = '';
+-	foreach($nslist as $ns)
++	foreach($nslist as $ns => $cnt)
+ 	{
++		if($cnt <= 0)
++			continue;
++		
+ 		if(!empty($temp))
+ 			$temp .= '|';
+ 		$temp .= $ns;
+Index: yp/.htaccess
+===================================================================
+--- yp/.htaccess	(revision 17)
++++ yp/.htaccess	(working copy)
+@@ -1,9 +1,11 @@
+ <Files index.txt>
+ 	AddType application/x-httpd-php .txt
++	SetEnv nokeepalive
+ </Files>
+ 
+ <Files yp4g.xml>
+ 	AddType application/x-httpd-php .xml
++	SetEnv nokeepalive
+ </Files>
+ 
+ #<Files chat2.php>
+Index: yp/dbsetup.php
+===================================================================
+--- yp/dbsetup.php	(revision 17)
++++ yp/dbsetup.php	(working copy)
+@@ -7,10 +7,10 @@
+ 	{
+ 		chmod($ChannelDB, 0666);
+ 		
+-		sqlite_query($chdb, "CREATE TABLE allow (id TEXT, ip TEXT, name TEXT, bitrate INTEGER, type TEXT, listeners INTEGER, relays INTEGER, age INTEGER, genre TEXT, description TEXT, url TEXT, comment TEXT, track_artist TEXT, track_title TEXT, track_album TEXT, track_genre TEXT, track_contact TEXT, direct INTEGER, status TEXT, limit_type TEXT, ns TEXT);");
+-		sqlite_query($chdb, "CREATE INDEX allow_idx ON allow (id, name, type, listeners, relays, age, ns);");
+-		sqlite_query($chdb, "CREATE TABLE deny (id TEXT, ip TEXT, name TEXT, bitrate INTEGER, type TEXT, listeners INTEGER, relays INTEGER, age INTEGER, genre TEXT, description TEXT, url TEXT, comment TEXT, track_artist TEXT, track_title TEXT, track_album TEXT, track_genre TEXT, track_contact TEXT, direct INTEGER, status TEXT, limit_type TEXT, ns TEXT);");
+-		sqlite_query($chdb, "CREATE INDEX deny_idx ON deny (id, name, type, listeners, relays, age, ns);");
++		sqlite_query($chdb, "CREATE TABLE allow (id TEXT, ip TEXT, name TEXT, name_raw TEXT, name_url TEXT, bitrate INTEGER, type TEXT, listeners INTEGER, relays INTEGER, age INTEGER, genre TEXT, description TEXT, url TEXT, comment TEXT, track_artist TEXT, track_title TEXT, track_album TEXT, track_genre TEXT, track_contact TEXT, direct INTEGER, status TEXT, limit_type TEXT, ns TEXT);");
++		sqlite_query($chdb, "CREATE INDEX allow_idx ON allow (id, name, name_raw, bitrate, type, listeners, relays, age, limit_type, ns);");
++		sqlite_query($chdb, "CREATE TABLE deny (id TEXT, ip TEXT, name TEXT, name_raw TEXT, name_url TEXT, bitrate INTEGER, type TEXT, listeners INTEGER, relays INTEGER, age INTEGER, genre TEXT, description TEXT, url TEXT, comment TEXT, track_artist TEXT, track_title TEXT, track_album TEXT, track_genre TEXT, track_contact TEXT, direct INTEGER, status TEXT, limit_type TEXT, ns TEXT);");
++		sqlite_query($chdb, "CREATE INDEX deny_idx ON deny (id, name, name_raw, bitrate, type, listeners, relays, age, limit_type, ns);");
+ 		sqlite_query($chdb, "CREATE TABLE var (name TEXT NOT NULL UNIQUE, value NOT NULL, last_update INTEGER DEFAULT '0');");
+ 		sqlite_query($chdb, "CREATE INDEX var_idx ON var (name);");
+ 		
+Index: yp/denied.php
+===================================================================
+--- yp/denied.php	(revision 17)
++++ yp/denied.php	(working copy)
+@@ -16,7 +16,7 @@
+ <meta name="robots" content="noarchive" />
+ <meta name="generator" content="YP4G" />
+ <link href="yp.css" rel="stylesheet" type="text/css" />
+-<title>Denied channels - <?= $YPName ?></title>
++<title>Denied channels - <?= htmlencode($YPName) ?></title>
+ </head>
+ <body>
+ 
+@@ -36,9 +36,6 @@
+ 	$count = 0;
+ 	while($data = sqlite_fetch_array($result, SQLITE_ASSOC))		// チャンネルリスト表示
+ 	{
+-		$data['name'] = htmlencode($data['name']);
+-		$data['genre'] = htmlencode($data['genre']);
+-		
+ 		print '<tr><td>';
+ 		
+ 		printf('<span class="name">%s</span>', $data['name']);
+Index: yp/index.php
+===================================================================
+--- yp/index.php	(revision 17)
++++ yp/index.php	(working copy)
+@@ -84,11 +84,13 @@
+ 		
+ 		$db = sqlite_open($ChannelDB);
+ 		
++		if(!$PortCheckPassOrg && !empty($SearchSQL))
++			$SearchSQL .= " AND (limit_type='')";
++		
+ 		$sql = "SELECT * FROM allow $SearchSQL ORDER BY age;";
+ 		$result = sqlite_array_query($db, $sql, SQLITE_ASSOC);
+ 		
+ 		print '<div><table class="chlist" summary="Channel list">';
+-		
+ 		print '<tr><th>&gt;&gt;</th><th>Channel</th><th>Status</th><th>Type</th></tr>';
+ 		
+ 		$show_count = 0;
+@@ -103,19 +105,6 @@
+ 			
+ 			// -----------------------------------------------------------------------------
+ 			
+-			$Name = $data['name'];
+-			$data['url'] = htmlspecialchars($data['url'], ENT_QUOTES, 'UTF-8');
+-			$data['name'] = htmlspecialchars($data['name'], ENT_QUOTES, 'UTF-8');
+-			$data['genre'] = htmlspecialchars($data['genre'], ENT_QUOTES, 'UTF-8');
+-			$data['description'] = htmlspecialchars($data['description'], ENT_QUOTES, 'UTF-8');
+-			$data['track_artist'] = htmlspecialchars($data['track_artist'], ENT_QUOTES, 'UTF-8');
+-			$data['track_title'] = htmlspecialchars($data['track_title'], ENT_QUOTES, 'UTF-8');
+-			$data['track_contact'] = htmlspecialchars($data['track_contact'], ENT_QUOTES, 'UTF-8');
+-			$data['track_genre'] = htmlspecialchars($data['track_genre'], ENT_QUOTES, 'UTF-8');
+-			$data['track_album'] = htmlspecialchars($data['track_album'], ENT_QUOTES, 'UTF-8');
+-			$data['type'] = htmlspecialchars($data['type'], ENT_QUOTES, 'UTF-8');
+-			$data['comment'] = htmlspecialchars($data['comment'], ENT_QUOTES, 'UTF-8');
+-			
+ 			print '<tr>';
+ 			
+ 			// -----------------------------------------------------------------------------
+@@ -161,11 +150,7 @@
+ 			else if(!empty($data['description']))
+ 				print '<br />['.$data['description'].'] ';
+ 			
+-			if(!empty($data['track_genre']) && !empty($data['track_album']))
+-				print '&lt;'.$data['track_genre'].' - '.$data['track_album'].'&gt;';
+-			else if(!empty($data['track_genre']))
+-				print '&lt;'.$data['track_genre'].'&gt;';
+-			else if(!empty($data['track_album']))
++			if(!empty($data['track_album']))
+ 				print '&lt;'.$data['track_album'].'&gt;';
+ 			
+ 			if(!empty($data['track_title']) || !empty($data['track_artist']))
+@@ -202,7 +187,7 @@
+ 			
+ 			print '<td class="cn">';
+ 			
+-			$temp = urlencode($Name);
++			$temp = $data['name_url'];
+ 			print $data['listeners'].' / '.$data['relays'].'<br />';
+ 			print '<a href="chat.php?cn='.$temp.'"><span class="board">(...)</span></a> ';
+ 			print '<a href="getgmt.php?cn='.$temp.'"><span class="board">Stats</span></a>';
+@@ -383,8 +368,6 @@
+ 		
+ 		print '</div>';
+ 	}
+-	
+-	readfile('footer.html');
+ ?>
+ 
+ <div class="powered">Powered by YP4G</div>
+Index: yp/index.txt
+===================================================================
+--- yp/index.txt	(revision 17)
++++ yp/index.txt	(working copy)
+@@ -9,11 +9,11 @@
+ 	$Remote = $_SERVER["REMOTE_ADDR"];
+ 	$Host = @$_GET['host'];
+ 	
+-	require './index_init.inc';
++	require 'index_init.inc';
+ 	
+ 	$db = sqlite_open($ChannelDB);
+ 	
+-	$sql = "SELECT * FROM allow $SearchSQL ORDER BY listeners DESC;";
++	$sql = "SELECT * FROM allow $SearchSQL ORDER BY age, listeners DESC;";
+ 	$result = sqlite_unbuffered_query($db, $sql, SQLITE_ASSOC);
+ 	
+ 	$count = 0;
+@@ -26,43 +26,43 @@
+ 		
+ 		$Name = $data['name'];
+ 		if(!empty($data['ns']))
+-			$Name .= ' <'.$data['ns'].'>';
++			$Name .= ' &lt;'.$data['ns'].'&gt;';
+ 		
+ 		if($SpeedCheckPass){
+-			print htmlspecialchars($Name, ENT_QUOTES, 'UTF-8').'<>';
++			print $Name.'<>';
+ 			print $data['id'].'<>';
+ 			print $data['ip'].'<>';
+ 		}else{
+ 			if($Speed > 0){
+-				print htmlspecialchars($Name, ENT_QUOTES, 'UTF-8').' (再生不可)<>';
++				print $Name.' (再生不可)<>';
+ 			}else{
+-				print htmlspecialchars($Name, ENT_QUOTES, 'UTF-8').' (要帯域チェック)<>';
++				print $Name.' (要帯域チェック)<>';
+ 				$count++;
+ 			}
+ 			
+ 			print '00000000000000000000000000000000<><>';
+ 		}
+ 		
+-		print htmlspecialchars($data['url'], ENT_QUOTES, 'UTF-8').'<>';
+-		print htmlspecialchars($data['genre'], ENT_QUOTES, 'UTF-8').'<>';
++		print $data['url'].'<>';
++		print $data['genre'].'<>';
+ 		
+ 		if(empty($data['description']))
+ 			print '&lt;'.$LimitMode.'&gt;<>';
+ 		else
+-			print htmlspecialchars($data['description'], ENT_QUOTES).' - &lt;'.$LimitMode.'&gt;<>';
++			print $data['description'].' - &lt;'.$LimitMode.'&gt;<>';
+ 		
+ 		print $data['listeners'].'<>';
+ 		print $data['relays'].'<>';
+ 		print $data['bitrate'].'<>';
+-		print htmlspecialchars($data['type'], ENT_QUOTES, 'UTF-8').'<>';
+-		print htmlspecialchars($data['track_artist'], ENT_QUOTES, 'UTF-8').'<>';
+-		print htmlspecialchars($data['track_album'], ENT_QUOTES, 'UTF-8').'<>';
+-		print htmlspecialchars($data['track_title'], ENT_QUOTES, 'UTF-8').'<>';
+-		print htmlspecialchars($data['track_genre'], ENT_QUOTES, 'UTF-8').'<>';
+-		print urlencode($data['name']).'<>';
++		print $data['type'].'<>';
++		print $data['track_artist'].'<>';
++		print $data['track_album'].'<>';
++		print $data['track_title'].'<>';
++		print $data['track_contact'].'<>';
++		print $data['name_url'].'<>';
+ 		print print_time($data['age']).'<>';
+-		print htmlspecialchars($data['status'], ENT_QUOTES, 'UTF-8').'<>';
+-		print htmlspecialchars($data['comment'], ENT_QUOTES, 'UTF-8').'<>';
++		print $data['status'].'<>';
++		print $data['comment'].'<>';
+ 		print $data['direct']."\n";
+ 	}
+ 	
+Index: yp/index_init.inc
+===================================================================
+--- yp/index_init.inc	(revision 17)
++++ yp/index_init.inc	(working copy)
+@@ -9,11 +9,14 @@
+ 	
+ 	$sql = "SELECT * FROM host WHERE ip='$Remote';";
+ 	$data = sqlite_array_query($hostdb, $sql, SQLITE_ASSOC);
+-	$data = array_shift($data);
++	$row = count($data);
+ 	
++	if($row == 1)
++		$data = array_shift($data);
++	
+ 	if($SpeedCheck)
+ 	{
+-		if(is_numeric($data['speed']))
++		if($row == 1)
+ 			$Speed = $data['speed'];
+ 		else
+ 			$Speed = 0;
+@@ -31,7 +34,7 @@
+ 		
+ 		if(!is_numeric($Port))
+ 		{
+-			if(is_numeric($data['port_no']))
++			if($row == 1)
+ 				$Port = $data['port_no'];
+ 			else
+ 				$Port = $DefaultPort;
+@@ -39,7 +42,7 @@
+ 	}
+ 	else
+ 	{
+-		if(preg_match('/[^:]*:([0-9]+)/', $Host, $Temp))
++		if(preg_match('/:([0-9]+)/', $Host, $Temp))
+ 		{
+ 			if(is_numeric($Temp[1]))
+ 				$Port = $Temp[1];
+@@ -50,13 +53,18 @@
+ 	{
+ 		$PortCheckPass = false;
+ 		
+-		if($Port > 0 && $Port <= 65535)
++		if($Port > 0 && $Port < 65536)
+ 		{
+-			$date_diff = time() - $data['port_open_date'];
+-			if(!$data ||
+-			   ($data['port_no'] != $Port && $date_diff > $CheckIntervalReject) ||
++			if($row == 1)
++				$date_diff = time() - $data['port_open_date'];
++			else
++				$date_diff = 0;
++			
++			if(($row == 0) ||
+ 			   ($data['port_open'] != 0 && $date_diff > $CheckIntervalPass) ||
+-			   ($data['port_open'] == 0 && $date_diff > $CheckIntervalReject))
++			   ($data['port_open'] == 0 && $date_diff > $CheckIntervalReject) ||
++			   ($data['port_no'] != $Port && $date_diff > $CheckIntervalReject)
++			  )
+ 			{
+ 				$PortCheckPass = port_check($Remote, $Port, true);
+ 				
+Index: yp/index_qs.inc
+===================================================================
+--- yp/index_qs.inc	(revision 17)
++++ yp/index_qs.inc	(working copy)
+@@ -6,11 +6,13 @@
+ 	
+ 	$SearchSQL = '';
+ 	
++	
+ 	$WordSQL = '';
++	$TypeSQL = '';
+ 	
+ 	if(!empty($_GET['find']))
+ 	{
+-		$target = "name||' '||genre||' '||description||' '||comment||' '||track_artist||' '||track_title";
++		$target = "name_raw||' '||genre||' '||description||' '||comment||' '||track_artist||' '||track_title";
+ 		
+ 		$words = str_replace('　', ' ', @$_GET['find']);
+ 		$words = explode(' ', $words);
+@@ -21,18 +23,20 @@
+ 			if($i >= 4)
+ 				break;
+ 			
+-			$word = remove_ctrl($word);
+-			
+ 			$len = strlen($word);
+ 			if($len < 2 || $len > 32)
+ 				continue;
+ 			
++			$word = remove_ctrl($word);
++			
+ 			if(preg_match('/[%_]/', $word))
+ 				continue;
+ 			
+ 			if(!empty($WordSQL))
+ 				$WordSQL .= ' AND ';
+ 			
++			$word = htmlspecialchars($word, ENT_QUOTES, 'UTF-8');
++			
+ 			if($word[0] == '-')
+ 			{
+ 				$word = substr($word, 1);
+@@ -47,8 +51,6 @@
+ 		}
+ 	}
+ 	
+-	$TypeSQL = '';
+-	
+ 	if(!empty($_GET['type']))
+ 	{
+ 		$_GET['type'] = strtoupper(@$_GET['type']);
+@@ -60,12 +62,12 @@
+ 			if($i >= 3)
+ 				break;
+ 			
+-			$type = remove_ctrl($type);
+-			
+ 			$len = strlen($type);
+ 			if($len < 3 || $len > 7)
+ 				continue;
+ 			
++			$type = remove_ctrl($type);
++			
+ 			if(preg_match('/[%_]/', $type))
+ 				continue;
+ 			
+@@ -73,6 +75,7 @@
+ 				$TypeSQL .= ' OR ';
+ 			
+ 			$TypeSQL .= sprintf("type='%s'", sqlite_escape_string($type));
++			
+ 			$i++;
+ 		}
+ 	}
+@@ -97,12 +100,12 @@
+ 			if($i >= 6)
+ 				break;
+ 			
+-			$ns = remove_ctrl($ns);
+-			
+ 			$len = strlen($ns);
+ 			if($len < 1 || $len > 32)
+ 				continue;
+ 			
++			$ns = remove_ctrl($ns);
++			
+ 			if(empty($ns) || preg_match('/[^a-zA-Z0-9]/', $ns))
+ 				continue;
+ 			
+@@ -110,6 +113,7 @@
+ 				$NSSQL .= ' OR ';
+ 			
+ 			$NSSQL .= sprintf("ns='%s'", sqlite_escape_string($ns));
++			
+ 			$i++;
+ 		}
+ 	}
+@@ -137,5 +141,6 @@
+ 	}
+ 	
+ 	if(!empty($SearchSQL))
+-		$SearchSQL = 'WHERE '.$SearchSQL;
++		$SearchSQL = 'WHERE ('.$SearchSQL.')';
++
+ ?>
+\ No newline at end of file
+Index: yp/util.php
+===================================================================
+--- yp/util.php	(revision 17)
++++ yp/util.php	(working copy)
+@@ -85,9 +85,6 @@
+ 	
+ 	function port_check($addr, $port, $use_pcp = false, $timeout = 2)
+ 	{
+-		if($addr == '192.168.1.1')
+-			return true;
+-		
+ 		if($use_pcp)
+ 		{
+ 			$fp = @fsockopen($addr, $port, $errno, $errstr, $timeout);
